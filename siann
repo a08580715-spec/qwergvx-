@@ -1,0 +1,194 @@
+-- LocalScript: 50%ヘッショ・高精度予測・ジャンプ対応・速度26安定版
+
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- === 【調整パラメータ】 ===
+local FOV_RADIUS = 181
+local LOCK_STRENGTH = 0.4 
+local PREDICTION = 0.0125 
+local HEADSHOT_CHANCE = 50 
+local ESP_NAME = "StandardESP"
+local SAFE_SPEED = 26 -- 27からさらに微調整して26に設定
+
+-- === 管理用変数 ===
+local isEnabled = false
+
+-- === 1. UI表示 ===
+local existingUi = PlayerGui:FindFirstChild("StudyMenu_Final")
+if existingUi then existingUi:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "StudyMenu_Final"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = PlayerGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 200, 0, 100)
+MainFrame.Position = UDim2.new(0.5, -100, 0.4, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Size = UDim2.new(0.8, 0, 0, 40)
+ToggleButton.Position = UDim2.new(0.1, 0, 0.4, 0)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(150, 0, 0)
+ToggleButton.Text = "AIMBOT: OFF"
+ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleButton.Parent = MainFrame
+
+-- === 2. ESP機能 ===
+local function updateESP()
+    if not isEnabled then
+        for _, player in pairs(Players:GetPlayers()) do
+            if player.Character then
+                for _, part in pairs(player.Character:GetChildren()) do
+                    local esp = part:FindFirstChild(ESP_NAME)
+                    if esp then esp:Destroy() end
+                end
+            end
+        end
+        return
+    end
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local isEnemy = (player.Team ~= LocalPlayer.Team or player.Team == nil)
+            local char = player.Character
+            if char and isEnemy then
+                local targetPart = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+                if targetPart then
+                    local esp = targetPart:FindFirstChild(ESP_NAME)
+                    if not esp then
+                        local b = Instance.new("BillboardGui", targetPart)
+                        b.Name = ESP_NAME
+                        b.AlwaysOnTop = true
+                        b.Size = UDim2.new(4, 0, 4.5, 0)
+                        b.StudsOffset = Vector3.new(0, 3, 0)
+                        local icon = Instance.new("ImageLabel", b)
+                        icon.Size = UDim2.new(0.5, 0, 0.5, 0)
+                        icon.Position = UDim2.new(0.25, 0, 0, 0)
+                        icon.BackgroundTransparency = 1
+                        icon.Image = "rbxthumb://type=AvatarHeadShot&id=" .. player.UserId .. "&w=150&h=150"
+                        local l = Instance.new("TextLabel", b)
+                        l.Size = UDim2.new(1, 0, 0.3, 0)
+                        l.Position = UDim2.new(0, 0, 0.55, 0)
+                        l.Text = player.Name
+                        l.TextColor3 = Color3.fromRGB(255, 0, 0)
+                        l.TextStrokeTransparency = 0
+                        l.BackgroundTransparency = 1
+                        l.TextScaled = true
+                        l.Font = Enum.Font.SourceSansBold
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- === 3. ロジック：可視判定と部位選択 ===
+local function isPartVisible(part)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {LocalPlayer.Character, Camera}
+    local result = workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, params)
+    return not result or result.Instance:IsDescendantOf(part.Parent)
+end
+
+local function getBestTarget()
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local minWeight = math.huge
+    local targetPart = nil
+    
+    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and (player.Team ~= LocalPlayer.Team or player.Team == nil) then
+            local char = player.Character
+            local root = char:FindFirstChild("HumanoidRootPart")
+            local head = char:FindFirstChild("Head")
+            local hum = char:FindFirstChild("Humanoid")
+            
+            if hum and hum.Health > 0 then
+                local selectedPart = nil
+                local forceHeadshot = (math.random(1, 100) <= HEADSHOT_CHANCE)
+
+                if forceHeadshot and head and isPartVisible(head) then
+                    selectedPart = head
+                elseif root and isPartVisible(root) then
+                    selectedPart = root
+                elseif head and isPartVisible(head) then
+                    selectedPart = head
+                end
+
+                if selectedPart then
+                    local pos, onScreen = Camera:WorldToViewportPoint(selectedPart.Position)
+                    if onScreen then
+                        local fovDist = (Vector2.new(pos.X, pos.Y) - screenCenter).Magnitude
+                        if fovDist < FOV_RADIUS then
+                            local distToMe = (selectedPart.Position - myRoot.Position).Magnitude
+                            local weight = distToMe + (fovDist * 0.4)
+                            if weight < minWeight then
+                                targetPart = selectedPart
+                                minWeight = weight
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return targetPart
+end
+
+-- === 4. 速度監視設定 ===
+local function setupSpeedLock(char)
+    local hum = char:WaitForChild("Humanoid")
+    hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+        if isEnabled and hum.WalkSpeed ~= SAFE_SPEED then
+            hum.WalkSpeed = SAFE_SPEED
+        end
+    end)
+end
+
+if LocalPlayer.Character then setupSpeedLock(LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(setupSpeedLock)
+
+-- === 5. 実行ループ ===
+ToggleButton.MouseButton1Click:Connect(function()
+    isEnabled = not isEnabled
+    ToggleButton.Text = isEnabled and "AIMBOT: ON" or "AIMBOT: OFF"
+    ToggleButton.BackgroundColor3 = isEnabled and Color3.fromRGB(0, 150, 0) or Color3.fromRGB(150, 0, 0)
+    
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChild("Humanoid")
+    if hum then
+        hum.WalkSpeed = isEnabled and SAFE_SPEED or 16
+    end
+
+    if not isEnabled then updateESP() end
+end)
+
+RunService:BindToRenderStep("SuperLock", Enum.RenderPriority.Camera.Value + 1, function()
+    updateESP()
+    if isEnabled then
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChild("Humanoid")
+        if hum then
+            hum.WalkSpeed = SAFE_SPEED
+        end
+
+        local target = getBestTarget()
+        if target then
+            local targetPos = target.Position + (target.Velocity * PREDICTION)
+            local lookAtCFrame = CFrame.lookAt(Camera.CFrame.Position, targetPos)
+            Camera.CFrame = Camera.CFrame:Lerp(lookAtCFrame, LOCK_STRENGTH)
+        end
+    end
+end)
